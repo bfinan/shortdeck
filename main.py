@@ -14,7 +14,7 @@ SCREEN_WIDTH = 1200
 SCREEN_HEIGHT = 800
 CARD_WIDTH = 80
 CARD_HEIGHT = 120
-CARD_SPACING = 10
+CARD_SPACING = -7  # Negative value for overlapping cards in hand
 
 # Colors
 WHITE = (255, 255, 255)
@@ -36,9 +36,12 @@ DIAMOND = (255, 39, 7)
 CLUB = (5, 31, 0)
 STAR = (207, 203, 0)
 
+## keep these lines as they will be refactored later
 POTS = ["Side Pot", "Main Pot", "Bomb Pot"]
+LEVELS = ["Tulsa", "Dallas", "Macau", ]
 
 CURRENCY_TICKER = ["₱","¥","₪","₩"]
+
 
 
 class Suit(Enum):
@@ -108,9 +111,6 @@ class HandEvaluator:
         if len(sorted_ranks) == 5:
             if sorted_ranks[-1] - sorted_ranks[0] == 4:
                 is_straight = True
-            # Check for A-2-3-4-5 straight
-            elif sorted_ranks == [2, 3, 4, 5, 14]:
-                is_straight = True
         
         # Royal Flush
         if is_straight and is_flush and len(sorted_ranks) >= 5 and sorted_ranks[-1] == 14 and sorted_ranks[0] == 10:
@@ -119,6 +119,10 @@ class HandEvaluator:
         # Straight Flush
         if is_straight and is_flush:
             return HandType.STRAIGHT_FLUSH, 8
+        
+        # Five of a Kind (possible with wildcards or special rules)
+        if counts[0] == 5:
+            return HandType.FIVE_OF_A_KIND, 10
         
         # Four of a Kind
         if counts[0] == 4:
@@ -129,7 +133,7 @@ class HandEvaluator:
             return HandType.FULL_HOUSE, 6
         
         # Flush
-        if is_flush:
+        if is_flush and len(cards)==5:
             return HandType.FLUSH, 5
         
         # Straight
@@ -158,19 +162,23 @@ class Game:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 36)
         self.small_font = pygame.font.Font(None, 24)
+        self.large_font = pygame.font.Font(None, 72)  # Large font for Game Over text
         
         self.deck = []
         self.hand = []
-        self.selected_cards = []
         self.discard_pile = []
         self.score = 0
         self.points = 0
         self.round = 1
-        self.hand_score = 0
         self.hand_type = None
         self.hands_remaining = 5  # Starting hands remaining
+        self.base_points_required = 100  # Base points required (increases each round)
         self.points_remaining = 100  # Minimum points required
         self.game_over = False
+        
+        # Pot and level tracking
+        self.pot_index = 0  # Current pot index (0=Side Pot, 1=Main Pot, 2=Bomb Pot)
+        self.level_index = 0  # Current level index (0=Tulsa, 1=Dallas, 2=Macau)
         self.spiral_angle = 0.0  # Animation angle for spiral
         
         # Discard limit
@@ -191,6 +199,31 @@ class Game:
         self.flying_components = []  # List of component data with positions and velocities
         self.show_round_recap = False
         self.round_complete = False  # Track if round has been completed
+        
+        # Money system (persists across rounds)
+        self.money = 0.0  # Store as float for cents precision
+        self.money_earned_this_round = 0.0  # Money earned from completing this round
+        self.interest_earned_this_round = 0.0  # Interest earned during round recap
+        
+        # Shop menu state
+        self.show_shop_menu = False
+        
+        # Sound effects
+        try:
+            self.sound_potion = pygame.mixer.Sound("res/potion.wav")
+            self.sound_coin = pygame.mixer.Sound("res/coin.wav")
+            self.sound_warning = pygame.mixer.Sound("res/warning.wav")
+            self.sound_game_over = pygame.mixer.Sound("res/dshit.mp3")
+        except pygame.error as e:
+            print(f"Warning: Could not load sound files: {e}")
+            self.sound_potion = None
+            self.sound_coin = None
+            self.sound_warning = None
+            self.sound_game_over = None
+        
+        # Track coin sound for round recap
+        self.round_recap_start_time = None
+        self.coin_sound_played = False
         
         self.create_deck()
         self.deal_hand()
@@ -241,7 +274,7 @@ class Game:
         self.screen.blit(spiral_surface, (0, 0))
         
         # Update animation angle slowly
-        self.spiral_angle += 0.0003
+        self.spiral_angle += 0.0005
     
     def create_deck(self):
         self.deck = [Card(suit, rank) for suit in Suit for rank in Rank]
@@ -309,6 +342,7 @@ class Game:
             HandType.FOUR_OF_A_KIND: 60,
             HandType.STRAIGHT_FLUSH: 100,
             HandType.ROYAL_FLUSH: 100,
+            HandType.FIVE_OF_A_KIND: 150,
         }.get(hand_type, 0)
         
         # Add points from card ranks
@@ -333,14 +367,25 @@ class Game:
         # Check if round is complete (points_remaining <= 0)
         if self.points_remaining <= 0 and not self.round_complete_animation and not self.round_complete:
             self.round_complete = True
+            # Award $1 for each remaining hand
+            self.money_earned_this_round = float(self.hands_remaining)
+            self.money = round(self.money + self.money_earned_this_round, 2)
             self.start_round_complete_animation()
         
         # Decrease hands remaining
         self.hands_remaining -= 1
         
+        # Play warning sound if one hands remaining
+        if self.hands_remaining == 1:
+            if self.sound_warning:
+                self.sound_warning.play()
+        
         # Check for game over condition
         if self.hands_remaining == 0 and self.score < self.points_remaining:
             self.game_over = True
+            # Play game over sound
+            if self.sound_game_over:
+                self.sound_game_over.play()
         
         # Start scoring animation instead of immediately removing cards
         self.start_scoring_animation(selected)
@@ -360,8 +405,10 @@ class Game:
         hand_y = SCREEN_HEIGHT - 200
         
         # Calculate target positions (centered with spacing)
+        # Use positive spacing (10) for scoring animation, not the overlapping spacing
+        SCORING_CARD_SPACING = 10
         num_cards = len(cards)
-        total_width = num_cards * CARD_WIDTH + (num_cards - 1) * CARD_SPACING
+        total_width = num_cards * CARD_WIDTH + (num_cards - 1) * SCORING_CARD_SPACING
         center_start_x = (SCREEN_WIDTH - total_width) // 2
         target_y = SCREEN_HEIGHT // 2 - CARD_HEIGHT // 2
         
@@ -371,7 +418,7 @@ class Game:
             if card.selected:
                 start_x = hand_start_x + i * (CARD_WIDTH + CARD_SPACING)
                 start_y = hand_y
-                target_x = center_start_x + card_index * (CARD_WIDTH + CARD_SPACING)
+                target_x = center_start_x + card_index * (CARD_WIDTH + SCORING_CARD_SPACING)
                 target_y_pos = target_y
                 
                 self.animated_cards.append((card, start_x, start_y, target_x, target_y_pos))
@@ -390,7 +437,7 @@ class Game:
         # Title
         self.flying_components.append({
             'type': 'text',
-            'text': POTS[0],
+            'text': POTS[self.pot_index],
             'font': self.font,
             'color': WHITE,
             'x': 20,
@@ -601,6 +648,11 @@ class Game:
         if elapsed >= 1.5:
             self.round_complete_animation = False
             self.show_round_recap = True
+            self.round_recap_start_time = pygame.time.get_ticks()
+            self.coin_sound_played = False
+            # Calculate and apply 20% interest on current money
+            self.interest_earned_this_round = round(self.money * 0.20, 2)
+            self.money = round(self.money + self.interest_earned_this_round, 2)
             if hasattr(self, '_last_animation_time'):
                 delattr(self, '_last_animation_time')
     
@@ -652,9 +704,9 @@ class Game:
             pygame.draw.polygon(screen, DIAMOND, points)
         elif suit == Suit.CLUBS:
             # Draw club: three circles + stem
-            pygame.draw.circle(screen, CLUB, (x + size//3, y + size//4), size//7)
-            pygame.draw.circle(screen, CLUB, (x + 2*size//3, y + size//4), size//7)
-            pygame.draw.circle(screen, CLUB, (x + size//2, y + size//2), size//7)
+            pygame.draw.circle(screen, CLUB, (x + size//3, y + size//3), size//4)
+            pygame.draw.circle(screen, CLUB, (x + 2*size//3, y + size//3), size//4)
+            pygame.draw.circle(screen, CLUB, (x + size//2, y+ (size//2*0.1)), size//4)
             pygame.draw.rect(screen, CLUB, (x + size//2 - size//14, y + size//2, size//7, size//3))
         elif suit == Suit.STARS:
             # Draw star: 5-pointed star shape
@@ -800,7 +852,7 @@ class Game:
     
     def draw_game_over(self):
         """Draw the Game Over screen"""
-        # First draw the main game screen
+        # First draw the main game screen (static background when game_over is True)
         self.draw()
         
         # Then add semi-transparent overlay
@@ -809,8 +861,8 @@ class Game:
         overlay.fill(BLACK)
         self.screen.blit(overlay, (0, 0))
         
-        # Game Over text
-        game_over_text = self.font.render("GAME OVER", True, RED)
+        # Game Over text (much bigger)
+        game_over_text = self.large_font.render("GAME OVER", True, RED)
         text_rect = game_over_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 100))
         self.screen.blit(game_over_text, text_rect)
         
@@ -824,10 +876,10 @@ class Game:
         required_rect = required_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 20))
         self.screen.blit(required_text, required_rect)
         
-        # Restart button
+        # Play Again button
         restart_button_x = SCREEN_WIDTH // 2 - 100
         restart_button_y = SCREEN_HEIGHT // 2 + 50
-        self.draw_button(self.screen, "Restart", restart_button_x, restart_button_y, 200, 40, True)
+        self.draw_button(self.screen, "Play Again", restart_button_x, restart_button_y, 200, 40, True)
         
         pygame.display.flip()
     
@@ -841,6 +893,56 @@ class Game:
             if restart_button_x <= x <= restart_button_x + 200 and restart_button_y <= y <= restart_button_y + 40:
                 self.restart_game()
             return
+        
+        # Handle shop menu clicks
+        if self.show_shop_menu:
+            # Shop items
+            shop_items = [
+                {"name": "Extra Discard", "cost": 5, "description": "Add 1 discard per round"},
+                {"name": "Larger Hand", "cost": 10, "description": "Increase max hand size by 1"},
+                {"name": "Bonus Points", "cost": 15, "description": "Start with +20 points next round"},
+            ]
+            
+            item_start_y = 180
+            item_spacing = 100
+            for i, item in enumerate(shop_items):
+                item_y = item_start_y + i * item_spacing
+                buy_button_x = SCREEN_WIDTH // 2 + 100
+                buy_button_y = item_y
+                
+                # Check buy button clicks
+                if buy_button_x <= x <= buy_button_x + 100 and buy_button_y <= y <= buy_button_y + 40:
+                    if self.money >= item['cost']:
+                        self.money = round(self.money - item['cost'], 2)
+                        # Play potion sound when purchasing
+                        if self.sound_potion:
+                            self.sound_potion.play()
+                        # TODO: Apply item effects (for now just deduct money)
+                        # In the future, these would modify game state
+                        if item['name'] == "Extra Discard":
+                            self.max_discards_per_round += 1
+                        elif item['name'] == "Larger Hand":
+                            self.max_hand_size += 1
+                        elif item['name'] == "Bonus Points":
+                            # This would be applied at start of next round
+                            pass
+                    return
+            
+            # Continue button (to start next round)
+            continue_button_x = SCREEN_WIDTH // 2 - 100
+            continue_button_y = SCREEN_HEIGHT - 80
+            if continue_button_x <= x <= continue_button_x + 200 and continue_button_y <= y <= continue_button_y + 40:
+                self.start_next_round()
+                return
+        
+        # Handle round recap clicks
+        if self.show_round_recap:
+            # Shop button
+            shop_button_x = SCREEN_WIDTH // 2 - 100
+            shop_button_y = SCREEN_HEIGHT // 2 + 80
+            if shop_button_x <= x <= shop_button_x + 200 and shop_button_y <= y <= shop_button_y + 40:
+                self.show_shop_menu = True
+                return
         
         # Check card clicks
         hand_start_x = (SCREEN_WIDTH - (len(self.hand) * (CARD_WIDTH + CARD_SPACING) - CARD_SPACING)) // 2
@@ -876,32 +978,149 @@ class Game:
     
     def draw_round_recap(self):
         """Draw the round recap screen"""
+        # Play coin sound 1 second after round recap appears
+        if self.round_recap_start_time is not None and not self.coin_sound_played:
+            elapsed = (pygame.time.get_ticks() - self.round_recap_start_time) / 1000.0
+            if elapsed >= 1.0:
+                if self.sound_coin:
+                    self.sound_coin.play()
+                self.coin_sound_played = True
+        
         self.screen.fill((15, 15, 30))  # Dark background
         
         # Round Recap title
         recap_title = self.font.render("ROUND COMPLETE!", True, WHITE)
-        title_rect = recap_title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 100))
+        title_rect = recap_title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 150))
         self.screen.blit(recap_title, title_rect)
         
-        # Placeholder text
-        placeholder = self.small_font.render("Placeholder text", True, LIGHT_GRAY)
-        placeholder_rect = placeholder.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
-        self.screen.blit(placeholder, placeholder_rect)
+        # Round statistics
+        stats_y = SCREEN_HEIGHT // 2 - 70
+        stats = [
+            f"Final Score: {self.score}",
+            f"Hands Remaining: {self.hands_remaining}",
+            f"Round: {self.round}",
+            f"Money Earned: ${self.money_earned_this_round:.2f}",
+        ]
+        # Add interest line if interest was earned
+        if self.interest_earned_this_round > 0:
+            stats.append(f"Interest Earned: ${self.interest_earned_this_round:.2f}")
+        stats.append(f"Total Money: ${self.money:.2f}")
+        for i, stat in enumerate(stats):
+            stat_text = self.small_font.render(stat, True, LIGHT_GRAY)
+            stat_rect = stat_text.get_rect(center=(SCREEN_WIDTH // 2, stats_y + i * 30))
+            self.screen.blit(stat_text, stat_rect)
+        
+        # Shop button
+        shop_button_x = SCREEN_WIDTH // 2 - 100
+        shop_button_y = SCREEN_HEIGHT // 2 + 80
+        self.draw_button(self.screen, "Shop", shop_button_x, shop_button_y, 200, 40, True)
         
         pygame.display.flip()
+    
+    def draw_shop_menu(self):
+        """Draw the shop menu screen"""
+        self.screen.fill((15, 15, 30))  # Dark background
+        
+        # Shop title
+        shop_title = self.font.render("SHOP", True, GOLD)
+        title_rect = shop_title.get_rect(center=(SCREEN_WIDTH // 2, 50))
+        self.screen.blit(shop_title, title_rect)
+        
+        # Display current money
+        money_text = self.small_font.render(f"Money: ${self.money:.2f}", True, GOLD)
+        money_rect = money_text.get_rect(center=(SCREEN_WIDTH // 2, 100))
+        self.screen.blit(money_text, money_rect)
+        
+        # Shop items (placeholder for now)
+        shop_items = [
+            {"name": "Extra Discard", "cost": 5, "description": "Add 1 discard per round"},
+            {"name": "Larger Hand", "cost": 10, "description": "Increase max hand size by 1"},
+            {"name": "Bonus Points", "cost": 15, "description": "Start with +20 points next round"},
+        ]
+        
+        # Draw shop items
+        item_start_y = 180
+        item_spacing = 100
+        for i, item in enumerate(shop_items):
+            item_y = item_start_y + i * item_spacing
+            
+            # Item name and cost
+            item_text = f"{item['name']} - ${item['cost']:.2f}"
+            item_surface = self.small_font.render(item_text, True, WHITE)
+            self.screen.blit(item_surface, (SCREEN_WIDTH // 2 - 150, item_y))
+            
+            # Item description
+            desc_surface = self.small_font.render(item['description'], True, LIGHT_GRAY)
+            self.screen.blit(desc_surface, (SCREEN_WIDTH // 2 - 150, item_y + 25))
+            
+            # Buy button
+            buy_button_x = SCREEN_WIDTH // 2 + 100
+            buy_button_y = item_y
+            can_afford = self.money >= item['cost']
+            self.draw_button(self.screen, "Buy", buy_button_x, buy_button_y, 100, 40, can_afford)
+        
+        # Continue button (to start next round)
+        continue_button_x = SCREEN_WIDTH // 2 - 100
+        continue_button_y = SCREEN_HEIGHT - 80
+        self.draw_button(self.screen, "Continue", continue_button_x, continue_button_y, 200, 40, True)
+        
+        pygame.display.flip()
+    
+    def start_next_round(self):
+        """Start the next round, resetting round-specific variables"""
+        self.round += 1
+        self.score = 0
+        self.points = 0
+        self.hand_type = None
+        self.hands_remaining = 5
+        # Increase difficulty: multiply points required by 1.5x each round
+        self.base_points_required = int(self.base_points_required * 1.5)
+        self.points_remaining = self.base_points_required
+        self.discards_remaining = self.max_discards_per_round
+        self.round_complete = False
+        self.show_round_recap = False
+        self.show_shop_menu = False
+        self.money_earned_this_round = 0.0
+        self.interest_earned_this_round = 0.0
+        self.scoring_animation = False
+        self.animated_cards = []
+        self.animation_progress = 0.0
+        self.animation_start_time = 0
+        self.fade_alpha = 255
+        self.round_recap_start_time = None
+        self.coin_sound_played = False
+        
+        # Update pot name after each round
+        self.pot_index = (self.pot_index + 1) % len(POTS)
+        # If pot cycles back to Side Pot (index 0), increase level
+        if self.pot_index == 0:
+            self.level_index = (self.level_index + 1) % len(LEVELS)
+        
+        self.create_deck()
+        self.deal_hand()
     
     def draw(self):
         # Update animations
         self.update_scoring_animation()
         self.update_round_complete_animation()
         
+        # Show shop menu if needed
+        if self.show_shop_menu:
+            self.draw_shop_menu()
+            return
+        
         # Show round recap screen if needed
         if self.show_round_recap:
             self.draw_round_recap()
             return
         
-        # Draw animated spiral background
-        self.draw_spiral_background()
+        # Don't animate background if game is over
+        if not self.game_over:
+            # Draw animated spiral background
+            self.draw_spiral_background()
+        else:
+            # Draw static background when game is over
+            self.screen.fill((15, 15, 30))
         
         # If round complete animation is active, draw flying components
         if self.round_complete_animation:
@@ -924,8 +1143,11 @@ class Game:
             pygame.display.flip()
             return
         
-        # Draw title
-        title = self.font.render(POTS[0], True, WHITE)
+        # Draw title (pot name and level)
+        pot_name = POTS[self.pot_index]
+        level_name = LEVELS[self.level_index]
+        title_text = f"{pot_name} - {level_name}"
+        title = self.font.render(title_text, True, WHITE)
         self.screen.blit(title, (20, 20))
         
         # Draw score info
@@ -1017,19 +1239,21 @@ class Game:
         pygame.display.flip()
     
     def restart_game(self):
-        """Reset the game to initial state"""
+        """Reset the game to initial state (including money)"""
+        self.round = 1
         self.round_complete = False
         self.deck = []
         self.hand = []
-        self.selected_cards = []
         self.discard_pile = []
         self.score = 0
         self.points = 0
-        self.hand_score = 0
         self.hand_type = None
         self.hands_remaining = 5
+        self.base_points_required = 100  # Reset to base value
         self.points_remaining = 100
         self.game_over = False
+        self.pot_index = 0  # Reset to Side Pot
+        self.level_index = 0  # Reset to Tulsa
         self.spiral_angle = 0.0
         self.max_discards_per_round = 3
         self.max_hand_size = 8
@@ -1039,6 +1263,13 @@ class Game:
         self.animation_progress = 0.0
         self.animation_start_time = 0
         self.fade_alpha = 255
+        self.money = 0.0  # Reset money on full game restart
+        self.money_earned_this_round = 0.0
+        self.interest_earned_this_round = 0.0
+        self.show_round_recap = False
+        self.show_shop_menu = False
+        self.round_recap_start_time = None
+        self.coin_sound_played = False
         
         self.create_deck()
         self.deal_hand()
