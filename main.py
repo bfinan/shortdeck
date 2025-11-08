@@ -208,6 +208,9 @@ class Game:
         # Shop menu state
         self.show_shop_menu = False
         
+        # Deck view state
+        self.show_deck_view = False
+        
         # Sound effects
         try:
             self.sound_potion = pygame.mixer.Sound("res/potion.wav")
@@ -797,7 +800,7 @@ class Game:
             suit_surface_flipped = pygame.transform.rotate(suit_surface, 180)
             draw_target.blit(suit_surface_flipped, (offset_x + width - 30 - 5, offset_y + height - 30 - 25))
     
-    def draw_card_back(self, screen: pygame.Surface, x: int, y: int, scale: float = 1.0):
+    def draw_card_back(self, screen: pygame.Surface, x: int, y: int, scale: float = 1.0, hover: bool = False):
         """Draw the backside of a card"""
         width = int(CARD_WIDTH * scale)
         height = int(CARD_HEIGHT * scale)
@@ -806,10 +809,13 @@ class Game:
         # Card back color (dark blue/purple to match theme)
         card_back_color = (40, 20, 60)
         border_color = (80, 40, 120)
+        hover_color = GOLD if hover else border_color
         
         # Draw card back
         pygame.draw.rect(screen, card_back_color, (x, y, width, height), width=0, border_radius=border_radius)
-        pygame.draw.rect(screen, border_color, (x, y, width, height), width=2, border_radius=border_radius)
+        # Draw thicker border if hovering
+        border_width = 4 if hover else 2
+        pygame.draw.rect(screen, hover_color, (x, y, width, height), width=border_width, border_radius=border_radius)
         
         # Draw a simple pattern on the back (diamond/star pattern)
         center_x = x + width // 2
@@ -944,6 +950,22 @@ class Game:
                 self.show_shop_menu = True
                 return
         
+        # Check back button in deck view (before other checks)
+        if self.show_deck_view:
+            back_button_x = SCREEN_WIDTH // 2 - 100
+            back_button_y = SCREEN_HEIGHT - 50
+            if back_button_x <= x <= back_button_x + 200 and back_button_y <= y <= back_button_y + 40:
+                self.show_deck_view = False
+                return
+        
+        # Check deck click (before card/button checks to ensure it's not blocked)
+        if not self.show_deck_view and not self.show_shop_menu and not self.show_round_recap:
+            deck_x = SCREEN_WIDTH - CARD_WIDTH - 20
+            deck_y = SCREEN_HEIGHT - CARD_HEIGHT - 20
+            if deck_x <= x <= deck_x + CARD_WIDTH and deck_y <= y <= deck_y + CARD_HEIGHT:
+                self.show_deck_view = True
+                return
+        
         # Check card clicks
         hand_start_x = (SCREEN_WIDTH - (len(self.hand) * (CARD_WIDTH + CARD_SPACING) - CARD_SPACING)) // 2
         hand_y = SCREEN_HEIGHT - 200
@@ -1066,6 +1088,72 @@ class Game:
         
         pygame.display.flip()
     
+    def draw_deck_view(self):
+        """Draw the deck view showing all remaining cards sorted by suit"""
+        self.screen.fill((15, 15, 30))  # Dark background
+        
+        # Title
+        title = self.font.render("DECK VIEW", True, WHITE)
+        title_rect = title.get_rect(center=(SCREEN_WIDTH // 2, 30))
+        self.screen.blit(title, title_rect)
+        
+        # Back button
+        back_button_x = SCREEN_WIDTH // 2 - 100
+        back_button_y = SCREEN_HEIGHT - 50
+        self.draw_button(self.screen, "Back", back_button_x, back_button_y, 200, 40, True)
+        
+        # Sort deck by suit, then by rank within each suit
+        suit_order = [Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS, Suit.STARS]
+        sorted_deck = sorted(self.deck, key=lambda card: (suit_order.index(card.suit), card.rank.value))
+        
+        # Group cards by suit
+        cards_by_suit = {}
+        for card in sorted_deck:
+            if card.suit not in cards_by_suit:
+                cards_by_suit[card.suit] = []
+            cards_by_suit[card.suit].append(card)
+        
+        # Draw cards organized by suit
+        start_y = 80
+        card_scale = 0.6  # Smaller cards for deck view
+        cards_per_row = 13  # Maximum cards per row
+        card_spacing = int(CARD_WIDTH * card_scale) + 5
+        
+        current_y = start_y
+        for suit in suit_order:
+            if suit not in cards_by_suit:
+                continue
+            
+            # Draw suit header
+            suit_name = suit.name.capitalize()
+            suit_text = self.small_font.render(f"{suit_name} ({len(cards_by_suit[suit])} cards):", True, WHITE)
+            self.screen.blit(suit_text, (20, current_y))
+            current_y += 30
+            
+            # Draw cards for this suit
+            cards = cards_by_suit[suit]
+            cards_in_row = 0
+            start_x = 20
+            
+            for card in cards:
+                if cards_in_row >= cards_per_row:
+                    cards_in_row = 0
+                    current_y += int(CARD_HEIGHT * card_scale) + 10
+                    start_x = 20
+                
+                card_x = start_x + cards_in_row * card_spacing
+                self.draw_card(self.screen, card, card_x, current_y, scale=card_scale)
+                cards_in_row += 1
+            
+            # Move to next suit
+            current_y += int(CARD_HEIGHT * card_scale) + 20
+        
+        # Deck count
+        deck_count_text = self.small_font.render(f"Total Cards in Deck: {len(self.deck)}", True, GOLD)
+        self.screen.blit(deck_count_text, (20, SCREEN_HEIGHT - 80))
+        
+        pygame.display.flip()
+    
     def start_next_round(self):
         """Start the next round, resetting round-specific variables"""
         self.round += 1
@@ -1080,6 +1168,7 @@ class Game:
         self.round_complete = False
         self.show_round_recap = False
         self.show_shop_menu = False
+        self.show_deck_view = False
         self.money_earned_this_round = 0.0
         self.interest_earned_this_round = 0.0
         self.scoring_animation = False
@@ -1112,6 +1201,11 @@ class Game:
         # Show round recap screen if needed
         if self.show_round_recap:
             self.draw_round_recap()
+            return
+        
+        # Show deck view if needed
+        if self.show_deck_view:
+            self.draw_deck_view()
             return
         
         # Don't animate background if game is over
@@ -1229,7 +1323,13 @@ class Game:
         # Draw deck visualization in bottom right
         deck_x = SCREEN_WIDTH - CARD_WIDTH - 20
         deck_y = SCREEN_HEIGHT - CARD_HEIGHT - 20
-        self.draw_card_back(self.screen, deck_x, deck_y)
+        
+        # Check if mouse is hovering over deck
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        deck_hover = (deck_x <= mouse_x <= deck_x + CARD_WIDTH and 
+                     deck_y <= mouse_y <= deck_y + CARD_HEIGHT)
+        
+        self.draw_card_back(self.screen, deck_x, deck_y, hover=deck_hover)
         
         # Draw deck count next to the deck
         deck_count = len(self.deck)
@@ -1268,6 +1368,7 @@ class Game:
         self.interest_earned_this_round = 0.0
         self.show_round_recap = False
         self.show_shop_menu = False
+        self.show_deck_view = False
         self.round_recap_start_time = None
         self.coin_sound_played = False
         
